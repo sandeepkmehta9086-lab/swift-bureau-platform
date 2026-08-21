@@ -1,0 +1,63 @@
+{
+  "framework": "CSCF",
+  "version": "2026",
+  "attestationDeadline": "2026-12-31",
+  "controls": [
+    {
+      "id": "1.1",
+      "title": "SWIFT environment protection (secure zone)",
+      "mandatory": true,
+      "objective": "SWIFT-related components operate in a dedicated secure zone.",
+      "evidenceHint": "Network diagram, jump host, Alliance Cloud connector placement."
+    },
+    {
+      "id": "2.4",
+      "title": "Back-office data-flow security",
+      "mandatory": true,
+      "objective": "Confidentiality, integrity, and mutual authentication on flows between the messaging interface and back office.",
+      "evidenceHint": "mTLS config, LAU/TLS design, adapter allowlist."
+    },
+    {
+      "id": "2.9",
+      "title": "Transaction business controls",
+      "mandatory": true,
+      "objective": "Maker-checker and dual control over sensitive actions.",
+      "evidenceHint": "Payment release requires distinct checker plus step-up TOTP."
+    },
+    {
+      "id": "4.1",
+      "title": "Password policy",
+      "mandatory": true,
+      "objective": "Strong authenticators, unique users, lockout.",
+      "evidenceHint": "Policy in IdentityService; no shared mailboxes as login IDs."
+    },
+    {
+      "id": "4.2",
+      "title": "Multi-factor authentication",
+      "mandatory": true,
+      "objective": "MFA for end-user login to the messaging interface; NIST SP 800-63B AAL2 guidance.",
+      "evidenceHint": "TOTP enrollment mandatory before session; step-up on release."
+    },
+    {
+      "id": "5.1",
+      "title": "Logical access control",
+      "mandatory": true,
+      "objective": "RBAC with least privilege and tenant isolation.",
+      "evidenceHint": "Role enum + tenant_id on every business row."
+    },
+    {
+      "id": "6.4",
+      "title": "Logging and monitoring",
+      "mandatory": true,
+      "objective": "Immutable audit of security and payment events.",
+      "evidenceHint": "audit_event table insert-only; warehouse versioning."
+    },
+    {
+      "id": "7.1",
+      "title": "Cyber incident response",
+      "mandatory": true,
+      "objective": "Detect, contain, notify SWIFT and customers.",
+      "evidenceHint": "operating-playbooks.md incident clock."
+    }
+  ]
+}

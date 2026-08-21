@@ -1,0 +1,15 @@
+target/
+data/
+*.log
+.idea/
+*.iml
+.vscode/
+.env
+node_modules/
+frontend/dist/
+backend/data/
+*.mv.db
+*.trace.db
+.DS_Store
+Thumbs.db
+seed-credentials.txt

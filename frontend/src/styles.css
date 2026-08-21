@@ -1,0 +1,77 @@
+:root {
+  --navy: #0b1f33;
+  --navy-2: #12304c;
+  --gold: #c4a35a;
+  --paper: #f4f1ea;
+  --card: #ffffff;
+  --ink: #1b2430;
+  --muted: #5c6b7a;
+  --danger: #9b2c2c;
+  --ok: #1f7a4d;
+  font-family: "Segoe UI", Cambria, system-ui, sans-serif;
+  color: var(--ink);
+  background: var(--paper);
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; }
+a { color: inherit; text-decoration: none; }
+button, input, select, textarea {
+  font: inherit;
+}
+button {
+  background: var(--navy);
+  color: #fff;
+  border: 0;
+  padding: 0.55rem 0.9rem;
+  cursor: pointer;
+}
+button.secondary { background: var(--navy-2); }
+button.ghost { background: transparent; color: #fff; border: 1px solid #ffffff55; }
+input, select, textarea {
+  width: 100%;
+  padding: 0.5rem 0.6rem;
+  border: 1px solid #c9d0d6;
+  background: #fff;
+}
+label { display: block; font-size: 0.8rem; color: var(--muted); margin: 0.4rem 0 0.2rem; }
+.layout { display: grid; grid-template-columns: 240px 1fr; min-height: 100vh; }
+.side {
+  background: linear-gradient(180deg, var(--navy), var(--navy-2));
+  color: #e8eef4;
+  padding: 1.2rem;
+}
+.side h1 { font-size: 1.05rem; margin: 0 0 0.2rem; letter-spacing: 0.04em; }
+.side p { margin: 0 0 1.2rem; color: #c4a35a; font-size: 0.78rem; }
+.side nav a, .side nav button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  color: #d7e2ec;
+  padding: 0.45rem 0;
+  border: 0;
+}
+.side nav a.active { color: var(--gold); }
+.main { padding: 1.5rem 2rem; }
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 0.8rem; }
+.card {
+  background: var(--card);
+  padding: 1rem;
+  border: 1px solid #e3ddd3;
+}
+.card h3 { margin: 0 0 0.35rem; font-size: 0.8rem; color: var(--muted); font-weight: 600; }
+table { width: 100%; border-collapse: collapse; background: #fff; }
+th, td { text-align: left; padding: 0.55rem 0.65rem; border-bottom: 1px solid #eee; font-size: 0.9rem; }
+.auth {
+  max-width: 420px;
+  margin: 8vh auto;
+  background: #fff;
+  padding: 2rem;
+  border-top: 4px solid var(--gold);
+}
+.err { color: var(--danger); font-size: 0.9rem; }
+.ok { color: var(--ok); }
+.row { display: grid; grid-template-columns: 1fr 1fr; gap: 0.8rem; }
+pre { background: #0b1f33; color: #e8eef4; padding: 0.8rem; overflow: auto; font-size: 0.75rem; }
+.banner { background: #fff6e5; border: 1px solid var(--gold); padding: 0.7rem 1rem; margin-bottom: 1rem; font-size: 0.9rem; }

@@ -1,0 +1,41 @@
+spring:
+  application:
+    name: swift-bureau-platform
+  datasource:
+    url: jdbc:h2:file:./data/swiftbureau;MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE;DEFAULT_NULL_ORDERING=HIGH
+    driver-class-name: org.h2.Driver
+    username: sa
+    password:
+  h2:
+    console:
+      enabled: false
+  jpa:
+    hibernate:
+      ddl-auto: update
+    open-in-view: false
+    properties:
+      hibernate:
+        jdbc:
+          time_zone: UTC
+
+server:
+  port: 8080
+
+app:
+  jwt:
+    secret: "change-me-to-a-64-character-secret-for-local-dev-only-do-not-use-prod"
+    ttl-minutes: 30
+  security:
+    lockout-threshold: 5
+    demo-totp-secret: JBSWY3DPEHPK3PXP
+  swift:
+    mode: STUB
+    live-enabled: false
+    alliance-base-url: https://alliance-cloud.example.swift
+  screening:
+    provider: STUB
+    fail-closed: true
+  csp:
+    controls-path: classpath:csp/cscf-v2026-controls.json
+  seed:
+    enabled: true
