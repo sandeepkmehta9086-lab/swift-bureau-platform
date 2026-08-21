@@ -77,6 +77,8 @@ class PaymentFlowIT {
     private String makerToken;
     private String checkerToken;
     private String makerBToken;
+    private String soToken;
+    private int suffix;
 
     @BeforeEach
     void setup() throws Exception {
@@ -86,6 +88,8 @@ class PaymentFlowIT {
         makerToken = login("maker." + n + "a");
         checkerToken = login("checker." + n + "a");
         makerBToken = login("maker." + n + "b");
+        soToken = login("so." + n + "a");
+        suffix = n;
         if (watchlist.findAll().stream().noneMatch(w -> "SANCTIONED PERSON".equalsIgnoreCase(w.getNamePattern()))) {
             WatchlistEntry entry = new WatchlistEntry();
             entry.setNamePattern("SANCTIONED PERSON");
@@ -195,6 +199,58 @@ class PaymentFlowIT {
         assertEquals(Role.BUREAU_OPERATOR, ops.getRole());
     }
 
+    @Test
+    void templateApplyCreatesDraftWithNewUetr() throws Exception {
+        String name = "USD-CHAS-WIDGET-" + suffix;
+        MvcResult createdTpl = mvc.perform(post("/api/templates")
+                        .header("Authorization", "Bearer " + soToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(templateJson(name, "ALPHGB2L")))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.name").value(name))
+                .andReturn();
+        String templateId = mapper.readTree(createdTpl.getResponse().getContentAsString()).get("id").asText();
+
+        mvc.perform(post("/api/templates")
+                        .header("Authorization", "Bearer " + makerToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(templateJson(name + "-maker", "ALPHGB2L")))
+                .andExpect(status().isForbidden());
+
+        MvcResult draft = mvc.perform(post("/api/payments")
+                        .header("Authorization", "Bearer " + makerToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"templateId":"%s","amount":2500.00}
+                                """.formatted(templateId)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("DRAFT"))
+                .andExpect(jsonPath("$.instructedAgentBic").value("CHASUS33"))
+                .andExpect(jsonPath("$.uetr").exists())
+                .andExpect(jsonPath("$.mxXml", containsString("UETR")))
+                .andReturn();
+        String uetr = mapper.readTree(draft.getResponse().getContentAsString()).get("uetr").asText();
+
+        MvcResult second = mvc.perform(post("/api/payments")
+                        .header("Authorization", "Bearer " + makerToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"templateId":"%s","amount":100.00}
+                                """.formatted(templateId)))
+                .andExpect(status().isOk())
+                .andReturn();
+        String uetr2 = mapper.readTree(second.getResponse().getContentAsString()).get("uetr").asText();
+        assertNotEquals(uetr, uetr2);
+
+        MvcResult listed = mvc.perform(get("/api/templates").header("Authorization", "Bearer " + makerBToken))
+                .andExpect(status().isOk())
+                .andReturn();
+        JsonNode templates = mapper.readTree(listed.getResponse().getContentAsString());
+        for (JsonNode node : templates) {
+            assertNotEquals(templateId, node.path("id").asText());
+        }
+    }
+
     private UUID seedBank(String name, String bic, String corr, String suffix) {
         BankTenant tenant = new BankTenant();
         tenant.setLegalName(name);
@@ -223,6 +279,7 @@ class PaymentFlowIT {
         accounts.save(nostro);
         seedUser(tenant.getId(), "maker." + suffix, Role.PAYMENT_MAKER);
         seedUser(tenant.getId(), "checker." + suffix, Role.PAYMENT_CHECKER);
+        seedUser(tenant.getId(), "so." + suffix, Role.BANK_SECURITY_OFFICER);
         return tenant.getId();
     }
 
@@ -258,6 +315,28 @@ class PaymentFlowIT {
     private String totp() throws Exception {
         long time = new SystemTimeProvider().getTime();
         return new DefaultCodeGenerator().generate(SECRET, time);
+    }
+
+    private String templateJson(String name, String instructingBic) {
+        return """
+                {
+                  "name":"%s",
+                  "description":"test template",
+                  "messageType":"pacs.008",
+                  "instructingAgentBic":"%s",
+                  "instructedAgentBic":"CHASUS33",
+                  "currency":"USD",
+                  "debtorName":"Acme Ltd",
+                  "debtorStreet":"1 King",
+                  "debtorTown":"London",
+                  "debtorCountry":"GB",
+                  "creditorName":"Widget LLC",
+                  "creditorStreet":"200 West",
+                  "creditorTown":"New York",
+                  "creditorCountry":"US",
+                  "chargeBearer":"SHAR"
+                }
+                """.formatted(name, instructingBic);
     }
 
     private String paymentJson(String debtor, String creditor) {

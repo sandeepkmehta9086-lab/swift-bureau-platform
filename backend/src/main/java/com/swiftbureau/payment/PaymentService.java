@@ -22,6 +22,8 @@ import com.swiftbureau.screening.ScreeningClient;
 import com.swiftbureau.security.CurrentUser;
 import com.swiftbureau.swift.SwiftNetworkGateway;
 import com.swiftbureau.swift.SwiftSendResult;
+import com.swiftbureau.template.MessageTemplate;
+import com.swiftbureau.template.TemplateService;
 import com.swiftbureau.tenant.BankBicRepository;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -44,6 +46,7 @@ public class PaymentService {
     private final ChargeService chargeService;
     private final CorrespondentAccountRepository accounts;
     private final CashStatementRepository statements;
+    private final TemplateService templateService;
 
     public PaymentService(
             PaymentMessageRepository payments,
@@ -56,7 +59,8 @@ public class PaymentService {
             LedgerService ledgerService,
             ChargeService chargeService,
             CorrespondentAccountRepository accounts,
-            CashStatementRepository statements
+            CashStatementRepository statements,
+            TemplateService templateService
     ) {
         this.payments = payments;
         this.bics = bics;
@@ -69,12 +73,14 @@ public class PaymentService {
         this.chargeService = chargeService;
         this.accounts = accounts;
         this.statements = statements;
+        this.templateService = templateService;
     }
 
     @Transactional
-    public PaymentMessage create(CurrentUser actor, CreatePaymentRequest req) {
+    public PaymentMessage create(CurrentUser actor, CreatePaymentRequest incoming) {
         assertRole(actor, Role.PAYMENT_MAKER, Role.BANK_SECURITY_OFFICER);
         UUID tenantId = actor.requireTenantId();
+        CreatePaymentRequest req = overlayTemplate(tenantId, incoming);
         if (!"pacs.008".equals(req.messageType()) && !"pacs.009".equals(req.messageType())) {
             throw new ApiException(400, "MSG_TYPE", "Use pacs.008 or pacs.009");
         }
@@ -87,6 +93,7 @@ public class PaymentService {
             throw new ApiException(400, "AMOUNT", "Amount must be positive");
         }
         PaymentMessage msg = new PaymentMessage();
+        msg.setId(UUID.randomUUID());
         msg.setTenantId(tenantId);
         msg.setMessageType(req.messageType());
         msg.setUetr(MxMessageFactory.newUetr());
@@ -111,7 +118,51 @@ public class PaymentService {
         payments.save(msg);
         gpiService.append(tenantId, msg.getUetr(), "INITIATED", msg.getInstructingAgentBic(), "Created by maker");
         auditService.record(actor, "PAYMENT_CREATED", "PaymentMessage", msg.getId().toString(), msg.getUetr());
+        UUID appliedTemplate = templateUuid(incoming.templateId());
+        if (appliedTemplate != null) {
+            auditService.record(actor, "TEMPLATE_APPLIED", "MessageTemplate", appliedTemplate.toString(), msg.getUetr());
+        }
         return msg;
+    }
+
+    private CreatePaymentRequest overlayTemplate(UUID tenantId, CreatePaymentRequest req) {
+        UUID templateId = templateUuid(req.templateId());
+        if (templateId == null) {
+            return req;
+        }
+        MessageTemplate template = templateService.requireActive(tenantId, templateId);
+        return new CreatePaymentRequest(
+                coalesce(req.messageType(), template.getMessageType()),
+                coalesce(req.instructingAgentBic(), template.getInstructingAgentBic()),
+                coalesce(req.instructedAgentBic(), template.getInstructedAgentBic()),
+                req.amount() != null ? req.amount() : template.getAmount(),
+                coalesce(req.currency(), template.getCurrency()),
+                coalesce(req.debtorName(), template.getDebtorName()),
+                coalesce(req.debtorStreet(), template.getDebtorStreet()),
+                coalesce(req.debtorTown(), template.getDebtorTown()),
+                coalesce(req.debtorCountry(), template.getDebtorCountry()),
+                coalesce(req.creditorName(), template.getCreditorName()),
+                coalesce(req.creditorStreet(), template.getCreditorStreet()),
+                coalesce(req.creditorTown(), template.getCreditorTown()),
+                coalesce(req.creditorCountry(), template.getCreditorCountry()),
+                req.chargeBearer() != null ? req.chargeBearer() : template.getChargeBearer(),
+                req.templateId()
+        );
+    }
+
+    private static UUID templateUuid(String value) {
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+        try {
+            return UUID.fromString(value);
+        } catch (IllegalArgumentException ex) {
+            throw new ApiException(400, "TEMPLATE", "Invalid template id");
+        }
+    }
+
+    private static String coalesce(String value, String fallback) {
+        return value == null || value.isBlank() ? fallback : value;
     }
 
     @Transactional
@@ -317,7 +368,8 @@ public class PaymentService {
             String creditorStreet,
             String creditorTown,
             String creditorCountry,
-            ChargeBearer chargeBearer
+            ChargeBearer chargeBearer,
+            String templateId
     ) {
     }
 }

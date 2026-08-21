@@ -21,6 +21,8 @@ import com.swiftbureau.tenant.BankBic;
 import com.swiftbureau.tenant.BankBicRepository;
 import com.swiftbureau.tenant.BankTenant;
 import com.swiftbureau.tenant.BankTenantRepository;
+import com.swiftbureau.template.MessageTemplate;
+import com.swiftbureau.template.MessageTemplateRepository;
 import org.springframework.boot.ApplicationArguments;
 import org.springframework.boot.ApplicationRunner;
 import org.springframework.core.annotation.Order;
@@ -41,6 +43,7 @@ public class DevDataSeeder implements ApplicationRunner {
     private final CorrespondentAccountRepository accounts;
     private final ChargeScheduleRepository charges;
     private final WatchlistEntryRepository watchlist;
+    private final MessageTemplateRepository templates;
     private final PasswordEncoder encoder;
 
     public DevDataSeeder(
@@ -52,6 +55,7 @@ public class DevDataSeeder implements ApplicationRunner {
             CorrespondentAccountRepository accounts,
             ChargeScheduleRepository charges,
             WatchlistEntryRepository watchlist,
+            MessageTemplateRepository templates,
             PasswordEncoder encoder
     ) {
         this.properties = properties;
@@ -62,6 +66,7 @@ public class DevDataSeeder implements ApplicationRunner {
         this.accounts = accounts;
         this.charges = charges;
         this.watchlist = watchlist;
+        this.templates = templates;
         this.encoder = encoder;
     }
 
@@ -138,6 +143,26 @@ public class DevDataSeeder implements ApplicationRunner {
         hit.setNamePattern("SANCTIONED PERSON");
         hit.setReason("Simulator hit — UAT only");
         watchlist.save(hit);
+
+        MessageTemplate template = new MessageTemplate();
+        template.setTenantId(tenant.getId());
+        template.setName("USD-CHAS-WIDGET");
+        template.setDescription("Standing USD customer credit to Widget LLC via CHASUS33");
+        template.setActive(true);
+        template.setMessageType("pacs.008");
+        template.setInstructingAgentBic("MIDNGB2L");
+        template.setInstructedAgentBic("CHASUS33");
+        template.setCurrency("USD");
+        template.setDebtorName("Acme Ltd");
+        template.setDebtorStreet("1 King Street");
+        template.setDebtorTown("London");
+        template.setDebtorCountry("GB");
+        template.setCreditorName("Widget LLC");
+        template.setCreditorStreet("200 West Street");
+        template.setCreditorTown("New York");
+        template.setCreditorCountry("US");
+        template.setChargeBearer(ChargeBearer.SHAR);
+        templates.save(template);
     }
 
     private void seedUser(java.util.UUID tenantId, String login, String email, Role role, String hash, String totp) {

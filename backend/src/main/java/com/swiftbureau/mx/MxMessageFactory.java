@@ -20,7 +20,8 @@ public final class MxMessageFactory {
     }
 
     public static String pacs008(PaymentMessage p) {
-        String msgId = "M" + p.getId().toString().replace("-", "").substring(0, 16);
+        UUID id = p.getId() != null ? p.getId() : UUID.randomUUID();
+        String msgId = "M" + id.toString().replace("-", "").substring(0, 16);
         return """
                 <?xml version="1.0" encoding="UTF-8"?>
                 <Document xmlns="urn:iso:std:iso:20022:tech:xsd:pacs.008.001.08">
@@ -64,7 +65,7 @@ public final class MxMessageFactory {
                 esc(msgId),
                 ISO.format(Instant.now().atOffset(ZoneOffset.UTC)),
                 esc(msgId),
-                esc(p.getId().toString()),
+                esc(id.toString()),
                 esc(p.getUetr()),
                 esc(p.getCurrency()),
                 p.getAmount().toPlainString(),

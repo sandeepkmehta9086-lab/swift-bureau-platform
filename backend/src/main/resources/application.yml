@@ -24,7 +24,7 @@ server:
 app:
   jwt:
     secret: "change-me-to-a-64-character-secret-for-local-dev-only-do-not-use-prod"
-    ttl-minutes: 30
+    ttl-minutes: 480
   security:
     lockout-threshold: 5
     demo-totp-secret: JBSWY3DPEHPK3PXP

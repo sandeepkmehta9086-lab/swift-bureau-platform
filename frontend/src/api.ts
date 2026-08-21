@@ -39,9 +39,16 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   }
   const res = await fetch(path, { ...init, headers });
   const text = await res.text();
-  const data = text ? JSON.parse(text) : null;
-  if (!res.ok) {
-    throw new Error(data?.message || data?.code || res.statusText);
+  let data: { message?: string; code?: string } | null = null;
+  if (text) {
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = null;
+    }
   }
-  return data as T;
+    if (!res.ok) {
+      throw new Error(data?.message || data?.code || res.statusText);
+    }
+    return data as T;
 }

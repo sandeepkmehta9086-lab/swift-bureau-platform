@@ -44,6 +44,7 @@ export default function App() {
           {bureau && <NavLink to="/tenants">Tenants</NavLink>}
           <NavLink to="/users">Users</NavLink>
           {!bureau && <NavLink to="/payments">Payments</NavLink>}
+          {!bureau && <NavLink to="/templates">Templates</NavLink>}
           {!bureau && <NavLink to="/inbox">Inbox</NavLink>}
           {!bureau && <NavLink to="/liquidity">Liquidity</NavLink>}
           {!bureau && <NavLink to="/rma">RMA</NavLink>}
@@ -78,6 +79,7 @@ export default function App() {
           <Route path="/payments" element={<Payments />} />
           <Route path="/payments/new" element={<NewPayment />} />
           <Route path="/payments/:id" element={<PaymentDetail />} />
+          <Route path="/templates" element={<Templates />} />
           <Route path="/inbox" element={<Inbox />} />
           <Route path="/liquidity" element={<Liquidity />} />
           <Route path="/rma" element={<Rma />} />
@@ -402,14 +404,21 @@ function Users() {
 
 function Payments() {
   const [rows, setRows] = useState<Payment[]>([]);
+  const [error, setError] = useState("");
   const nav = useNavigate();
+  const user = currentUser();
+  const canCreate = user?.role === "PAYMENT_MAKER" || user?.role === "BANK_SECURITY_OFFICER";
   useEffect(() => {
-    api<Payment[]>("/api/payments?direction=OUT").then(setRows);
+    api<Payment[]>("/api/payments?direction=OUT").then(setRows).catch((e) => setError((e as Error).message));
   }, []);
   return (
     <div>
       <h2>Outbound payments</h2>
-      <button onClick={() => nav("/payments/new")}>New pacs.008</button>
+      {canCreate && <button onClick={() => nav("/payments/new")}>New pacs.008</button>}
+      {!canCreate && (
+        <p>Only a payment maker or bank security officer can create drafts. Sign in as <code>meridian.maker</code>.</p>
+      )}
+      {error && <p className="err">{error}</p>}
       <table>
         <thead>
           <tr>
@@ -445,6 +454,8 @@ function Payments() {
 function NewPayment() {
   const nav = useNavigate();
   const [error, setError] = useState("");
+  const [templates, setTemplates] = useState<any[]>([]);
+  const [selected, setSelected] = useState("");
   const [form, setForm] = useState({
     messageType: "pacs.008",
     instructingAgentBic: "MIDNGB2L",
@@ -461,17 +472,56 @@ function NewPayment() {
     creditorCountry: "US",
     chargeBearer: "SHAR",
   });
+  useEffect(() => {
+    api<any[]>("/api/templates").then(setTemplates).catch(() => setTemplates([]));
+  }, []);
+  function applyTemplate(id: string) {
+    setSelected(id);
+    const t = templates.find((row) => row.id === id);
+    if (!t) {
+      return;
+    }
+    setForm({
+      messageType: t.messageType || "pacs.008",
+      instructingAgentBic: t.instructingAgentBic || "",
+      instructedAgentBic: t.instructedAgentBic || "",
+      amount: t.amount != null ? String(t.amount) : "",
+      currency: t.currency || "USD",
+      debtorName: t.debtorName || "",
+      debtorStreet: t.debtorStreet || "",
+      debtorTown: t.debtorTown || "",
+      debtorCountry: t.debtorCountry || "",
+      creditorName: t.creditorName || "",
+      creditorStreet: t.creditorStreet || "",
+      creditorTown: t.creditorTown || "",
+      creditorCountry: t.creditorCountry || "",
+      chargeBearer: t.chargeBearer || "SHAR",
+    });
+  }
   return (
     <div>
       <h2>Create payment</h2>
-      <p>Structured town and country are mandatory (CBPR+ November 2026).</p>
+      <p>Structured town and country are mandatory (CBPR+ November 2026). Sign in as meridian.maker to save a draft.</p>
+      <label>Use template</label>
+      <select value={selected} onChange={(e) => applyTemplate(e.target.value)}>
+        <option value="">Blank form</option>
+        {templates.map((t) => (
+          <option key={t.id} value={t.id}>
+            {t.name}
+          </option>
+        ))}
+      </select>
       <form
         onSubmit={async (e) => {
           e.preventDefault();
           try {
             const created = await api<Payment>("/api/payments", {
               method: "POST",
-              body: JSON.stringify({ ...form, amount: Number(form.amount) }),
+              body: JSON.stringify({
+                ...form,
+                amount: form.amount === "" ? null : Number(form.amount),
+                templateId: selected || null,
+              }),
             });
             nav(`/payments/${created.id}`);
           } catch (err) {
@@ -488,6 +538,116 @@ function NewPayment() {
         {error && <p className="err">{error}</p>}
         <button type="submit">Save draft</button>
       </form>
+    </div>
+  );
+}
+
+function Templates() {
+  const user = currentUser();
+  const canEdit = user?.role === "BANK_SECURITY_OFFICER";
+  const [rows, setRows] = useState<any[]>([]);
+  const [error, setError] = useState("");
+  const blank = {
+    name: "",
+    description: "",
+    messageType: "pacs.008",
+    instructingAgentBic: "MIDNGB2L",
+    instructedAgentBic: "CHASUS33",
+    amount: "",
+    currency: "USD",
+    debtorName: "Acme Ltd",
+    debtorStreet: "1 King Street",
+    debtorTown: "London",
+    debtorCountry: "GB",
+    creditorName: "Widget LLC",
+    creditorStreet: "200 West Street",
+    creditorTown: "New York",
+    creditorCountry: "US",
+    chargeBearer: "SHAR",
+    active: true,
+  };
+  const [form, setForm] = useState({ ...blank });
+  async function reload() {
+    const path = canEdit ? "/api/templates?includeInactive=true" : "/api/templates";
+    setRows(await api(path));
+  }
+  useEffect(() => {
+    reload().catch((e) => setError((e as Error).message));
+  }, []);
+  return (
+    <div>
+      <h2>Message templates</h2>
+      <p>Reusable CBPR+ fields. Applying a template creates a new draft and a new UETR — it does not send SWIFT.</p>
+      {canEdit && (
+        <form
+          onSubmit={async (e) => {
+            e.preventDefault();
+            try {
+              await api("/api/templates", {
+                method: "POST",
+                body: JSON.stringify({
+                  ...form,
+                  amount: form.amount === "" ? null : Number(form.amount),
+                }),
+              });
+              setForm({ ...blank });
+              await reload();
+            } catch (err) {
+              setError((err as Error).message);
+            }
+          }}
+        >
+          {Object.entries(form)
+            .filter(([k]) => k !== "active")
+            .map(([k, v]) => (
+              <div key={k}>
+                <label>{k}</label>
+                <input value={String(v)} onChange={(e) => setForm({ ...form, [k]: e.target.value })} />
+              </div>
+            ))}
+          {error && <p className="err">{error}</p>}
+          <button type="submit">Save template</button>
+        </form>
+      )}
+      <table>
+        <thead>
+          <tr>
+            <th>Name</th>
+            <th>Type</th>
+            <th>To BIC</th>
+            <th>CCY</th>
+            <th>Status</th>
+            {canEdit && <th></th>}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((t) => (
+            <tr key={t.id}>
+              <td>{t.name}</td>
+              <td>{t.messageType}</td>
+              <td>{t.instructedAgentBic}</td>
+              <td>{t.currency}</td>
+              <td>{t.active ? "ACTIVE" : "INACTIVE"}</td>
+              {canEdit && (
+                <td>
+                  <button
+                    className="secondary"
+                    onClick={async () => {
+                      await api(`/api/templates/${t.id}`, {
+                        method: "PATCH",
+                        body: JSON.stringify({ ...t, active: !t.active }),
+                      });
+                      reload();
+                    }}
+                  >
+                    {t.active ? "Deactivate" : "Activate"}
+                  </button>
+                </td>
+              )}
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   );
 }
