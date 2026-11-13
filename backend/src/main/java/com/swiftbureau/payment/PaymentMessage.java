@@ -82,6 +82,10 @@ public class PaymentMessage {
 
     private String screeningResult;
 
+    /** ISO 20022 reason/status code carried by status, cancellation and return messages (e.g. ACCP, RJCT, CNCL, FOCR). */
+    @Column(length = 8)
+    private String reasonCode;
+
     @Column(nullable = false)
     private Instant createdAt;
 
@@ -303,6 +307,14 @@ public class PaymentMessage {
 
     public void setScreeningResult(String screeningResult) {
         this.screeningResult = screeningResult;
+    }
+
+    public String getReasonCode() {
+        return reasonCode;
+    }
+
+    public void setReasonCode(String reasonCode) {
+        this.reasonCode = reasonCode;
     }
 
     public Instant getCreatedAt() {

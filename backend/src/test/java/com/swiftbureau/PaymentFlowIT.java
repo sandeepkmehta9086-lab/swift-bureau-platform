@@ -10,6 +10,7 @@ import com.swiftbureau.domain.TenantStatus;
 import com.swiftbureau.domain.UserStatus;
 import com.swiftbureau.identity.UserAccount;
 import com.swiftbureau.identity.UserAccountRepository;
+import com.swiftbureau.ledger.LedgerService;
 import com.swiftbureau.rma.RmaRelationship;
 import com.swiftbureau.rma.RmaRelationshipRepository;
 import com.swiftbureau.correspondent.CorrespondentAccount;
@@ -34,12 +35,16 @@ import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
 
 import java.math.BigDecimal;
+import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.Stream;
+import java.util.stream.StreamSupport;
 
 import static org.hamcrest.Matchers.containsString;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
@@ -71,6 +76,8 @@ class PaymentFlowIT {
     WatchlistEntryRepository watchlist;
     @Autowired
     PasswordEncoder encoder;
+    @Autowired
+    LedgerService ledger;
 
     private UUID tenantA;
     private UUID tenantB;
@@ -137,6 +144,180 @@ class PaymentFlowIT {
         mvc.perform(get("/api/gpi/" + uetr).header("Authorization", "Bearer " + makerToken))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$[0].hopStatus").value("INITIATED"));
+    }
+
+    @Test
+    void scenario1CustomerInstructionAcceptedRunsThroughClearingAndReporting() throws Exception {
+        // Stage 1: pain.001 in, pain.002 ACCP out, pacs.008 drafted on the same UETR.
+        MvcResult initiated = mvc.perform(post("/api/payments/initiate")
+                        .header("Authorization", "Bearer " + makerToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(instructionJson("Acme Ltd", "London")))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.accepted").value(true))
+                .andExpect(jsonPath("$.reasonCode").value("ACCP"))
+                .andExpect(jsonPath("$.instruction.messageType").value("pain.001"))
+                .andExpect(jsonPath("$.instruction.direction").value("IN"))
+                .andExpect(jsonPath("$.instruction.status").value("ACKED"))
+                .andExpect(jsonPath("$.instruction.mxXml", containsString("pain.001.001.09")))
+                .andExpect(jsonPath("$.statusReport.messageType").value("pain.002"))
+                .andExpect(jsonPath("$.statusReport.direction").value("OUT"))
+                .andExpect(jsonPath("$.statusReport.mxXml", containsString("<GrpSts>ACCP</GrpSts>")))
+                .andExpect(jsonPath("$.payment.messageType").value("pacs.008"))
+                .andExpect(jsonPath("$.payment.status").value("DRAFT"))
+                .andReturn();
+        JsonNode result = mapper.readTree(initiated.getResponse().getContentAsString());
+        String uetr = result.get("instruction").get("uetr").asText();
+        assertEquals(uetr, result.get("statusReport").get("uetr").asText());
+        assertEquals(uetr, result.get("payment").get("uetr").asText());
+        String paymentId = result.get("payment").get("id").asText();
+
+        // Stage 2: clear via maker submit + checker release; stub answers pacs.002.
+        mvc.perform(post("/api/payments/" + paymentId + "/submit").header("Authorization", "Bearer " + makerToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("PENDING_CHECK"));
+        mvc.perform(post("/api/payments/" + paymentId + "/approve")
+                        .header("Authorization", "Bearer " + checkerToken)
+                        .header("X-Step-Up-Totp", totp()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("ACKED"))
+                .andExpect(jsonPath("$.uetr").value(uetr));
+
+        // Stage 3: camt.054 debit notification sits on the shadow nostro.
+        MvcResult statements = mvc.perform(get("/api/statements").header("Authorization", "Bearer " + makerToken))
+                .andExpect(status().isOk())
+                .andReturn();
+        JsonNode stmts = mapper.readTree(statements.getResponse().getContentAsString());
+        assertTrue(stream(stmts).anyMatch(s -> "camt.054".equals(s.path("messageType").asText())
+                && uetr.equals(s.path("uetr").asText())
+                && s.path("mxXml").asText().contains("<CdtDbtInd>DBIT</CdtDbtInd>")));
+
+        // Every message of the journey shares the UETR and the tracker shows the whole story in order.
+        assertEquals(List.of("CUSTOMER_INSTRUCTED", "CUSTOMER_ACCEPTED", "INITIATED", "SENT_TO_SWIFT",
+                "RECEIVED_BY_CORRESPONDENT", "CREDITED"), hops(uetr, makerToken));
+        List<String> types = messageTypes(uetr, makerToken);
+        assertTrue(types.containsAll(List.of("pain.001", "pain.002", "pacs.008", "pacs.002")), types.toString());
+    }
+
+    @Test
+    void scenario1RejectedInstructionGetsPain002RjctAndNoPacs008() throws Exception {
+        MvcResult initiated = mvc.perform(post("/api/payments/initiate")
+                        .header("Authorization", "Bearer " + makerToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(instructionJson("Acme Ltd", "")))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.accepted").value(false))
+                .andExpect(jsonPath("$.reasonCode").value("BE04"))
+                .andExpect(jsonPath("$.payment").doesNotExist())
+                .andExpect(jsonPath("$.instruction.status").value("REJECTED"))
+                .andExpect(jsonPath("$.statusReport.reasonCode").value("BE04"))
+                .andExpect(jsonPath("$.statusReport.mxXml", containsString("<TxSts>RJCT</TxSts>")))
+                .andExpect(jsonPath("$.statusReport.mxXml", containsString("<Cd>BE04</Cd>")))
+                .andReturn();
+        String uetr = mapper.readTree(initiated.getResponse().getContentAsString()).get("instruction").get("uetr").asText();
+
+        assertEquals(List.of("CUSTOMER_INSTRUCTED", "CUSTOMER_REJECTED"), hops(uetr, makerToken));
+        List<String> types = messageTypes(uetr, makerToken);
+        assertEquals(List.of("pain.001", "pain.002"), types.stream().sorted().toList());
+
+        // Malformed instructions (not storable) are a channel error, not a pain.002.
+        mvc.perform(post("/api/payments/initiate")
+                        .header("Authorization", "Bearer " + makerToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(instructionJson("Acme Ltd", "London").replace("1500.00", "null")))
+                .andExpect(status().isBadRequest());
+        mvc.perform(post("/api/payments/initiate")
+                        .header("Authorization", "Bearer " + checkerToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(instructionJson("Acme Ltd", "London")))
+                .andExpect(status().isForbidden());
+    }
+
+    @Test
+    void scenario1RecallRejectedByCorrespondentLeavesFundsWithBeneficiary() throws Exception {
+        String id = releasedPayment();
+        String uetr = uetrOf(id);
+        UUID nostro = accounts.findByTenantId(tenantA).get(0).getId();
+        BigDecimal afterSend = ledger.bookedBalance(tenantA, nostro);
+        assertEquals(0, new BigDecimal("-1500.00").compareTo(afterSend));
+
+        mvc.perform(post("/api/payments/" + id + "/recall").header("Authorization", "Bearer " + makerToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.messageType").value("camt.056"))
+                .andExpect(jsonPath("$.reasonCode").value("CUST"))
+                .andExpect(jsonPath("$.status").value("ACKED"))
+                .andExpect(jsonPath("$.uetr").value(uetr))
+                .andExpect(jsonPath("$.mxXml", containsString("<Cd>CUST</Cd>")));
+
+        mvc.perform(get("/api/payments/" + id).header("Authorization", "Bearer " + makerToken))
+                .andExpect(jsonPath("$.status").value("ACKED"));
+        List<String> types = messageTypes(uetr, makerToken);
+        assertTrue(types.contains("camt.029"), types.toString());
+        assertTrue(!types.contains("pacs.004"), types.toString());
+        assertEquals("RJCR", inbound(uetr, "camt.029", makerToken).get("reasonCode").asText());
+        assertEquals(List.of("INITIATED", "SENT_TO_SWIFT", "RECEIVED_BY_CORRESPONDENT", "CREDITED",
+                "RECALL_REQUESTED", "RECALL_REJECTED"), hops(uetr, makerToken));
+        assertEquals(0, afterSend.compareTo(ledger.bookedBalance(tenantA, nostro)));
+    }
+
+    @Test
+    void scenario1RecallAcceptedReturnsFundsWithPacs004() throws Exception {
+        String id = releasedPayment();
+        String uetr = uetrOf(id);
+        UUID nostro = accounts.findByTenantId(tenantA).get(0).getId();
+
+        mvc.perform(post("/api/payments/" + id + "/recall")
+                        .header("Authorization", "Bearer " + makerToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"reasonCode\":\"dupl\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.messageType").value("camt.056"))
+                .andExpect(jsonPath("$.reasonCode").value("DUPL"))
+                .andExpect(jsonPath("$.mxXml", containsString("<Cd>DUPL</Cd>")));
+
+        mvc.perform(get("/api/payments/" + id).header("Authorization", "Bearer " + makerToken))
+                .andExpect(jsonPath("$.status").value("RETURNED"))
+                .andExpect(jsonPath("$.uetr").value(uetr));
+        assertEquals("CNCL", inbound(uetr, "camt.029", makerToken).get("reasonCode").asText());
+        JsonNode pacs004 = inbound(uetr, "pacs.004", makerToken);
+        assertEquals("FOCR", pacs004.get("reasonCode").asText());
+        assertEquals("CHASUS33", pacs004.get("instructingAgentBic").asText());
+        assertTrue(pacs004.get("mxXml").asText().contains("<RtrdIntrBkSttlmAmt Ccy=\"USD\">1500.00</RtrdIntrBkSttlmAmt>"));
+
+        // Shadow ledger debit reversed and a camt.054 credit notification stored.
+        assertEquals(0, BigDecimal.ZERO.compareTo(ledger.bookedBalance(tenantA, nostro)));
+        JsonNode stmts = mapper.readTree(mvc.perform(get("/api/statements").header("Authorization", "Bearer " + makerToken))
+                .andReturn().getResponse().getContentAsString());
+        assertTrue(stream(stmts).anyMatch(s -> uetr.equals(s.path("uetr").asText())
+                && s.path("mxXml").asText().contains("<CdtDbtInd>CRDT</CdtDbtInd>")));
+
+        assertEquals(List.of("INITIATED", "SENT_TO_SWIFT", "RECEIVED_BY_CORRESPONDENT", "CREDITED",
+                "RECALL_REQUESTED", "RECALL_ACCEPTED", "RETURNED"), hops(uetr, makerToken));
+
+        // A returned payment cannot be recalled twice.
+        mvc.perform(post("/api/payments/" + id + "/recall").header("Authorization", "Bearer " + makerToken))
+                .andExpect(status().isConflict());
+    }
+
+    @Test
+    void recallNeedsASentPaymentAndCustomerUser() throws Exception {
+        MvcResult created = mvc.perform(post("/api/payments")
+                        .header("Authorization", "Bearer " + makerToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(paymentJson("Acme Ltd", "Widget LLC")))
+                .andExpect(status().isOk())
+                .andReturn();
+        String id = mapper.readTree(created.getResponse().getContentAsString()).get("id").asText();
+        mvc.perform(post("/api/payments/" + id + "/recall").header("Authorization", "Bearer " + makerToken))
+                .andExpect(status().isConflict());
+        mvc.perform(post("/api/payments/" + id + "/recall").header("Authorization", "Bearer " + makerBToken))
+                .andExpect(status().isNotFound());
+        String released = releasedPayment();
+        mvc.perform(post("/api/payments/" + released + "/recall")
+                        .header("Authorization", "Bearer " + makerToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"reasonCode\":\"not a code\"}"))
+                .andExpect(status().isBadRequest());
     }
 
     @Test
@@ -313,8 +494,9 @@ class PaymentFlowIT {
     }
 
     private String totp() throws Exception {
-        long time = new SystemTimeProvider().getTime();
-        return new DefaultCodeGenerator().generate(SECRET, time);
+        // DefaultCodeVerifier checks generate(secret, floor(now / period)), so the counter is the 30s bucket, not raw seconds.
+        long bucket = Math.floorDiv(new SystemTimeProvider().getTime(), 30);
+        return new DefaultCodeGenerator().generate(SECRET, bucket);
     }
 
     private String templateJson(String name, String instructingBic) {
@@ -337,6 +519,86 @@ class PaymentFlowIT {
                   "chargeBearer":"SHAR"
                 }
                 """.formatted(name, instructingBic);
+    }
+
+    /** Runs the golden path (create → submit → approve) and returns the released pacs.008 id. */
+    private String releasedPayment() throws Exception {
+        MvcResult created = mvc.perform(post("/api/payments")
+                        .header("Authorization", "Bearer " + makerToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(paymentJson("Acme Ltd", "Widget LLC")))
+                .andExpect(status().isOk())
+                .andReturn();
+        String id = mapper.readTree(created.getResponse().getContentAsString()).get("id").asText();
+        mvc.perform(post("/api/payments/" + id + "/submit").header("Authorization", "Bearer " + makerToken))
+                .andExpect(status().isOk());
+        mvc.perform(post("/api/payments/" + id + "/approve")
+                        .header("Authorization", "Bearer " + checkerToken)
+                        .header("X-Step-Up-Totp", totp()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("ACKED"));
+        return id;
+    }
+
+    private String uetrOf(String id) throws Exception {
+        MvcResult res = mvc.perform(get("/api/payments/" + id).header("Authorization", "Bearer " + makerToken))
+                .andExpect(status().isOk())
+                .andReturn();
+        return mapper.readTree(res.getResponse().getContentAsString()).get("uetr").asText();
+    }
+
+    private List<String> hops(String uetr, String token) throws Exception {
+        MvcResult res = mvc.perform(get("/api/gpi/" + uetr).header("Authorization", "Bearer " + token))
+                .andExpect(status().isOk())
+                .andReturn();
+        return stream(mapper.readTree(res.getResponse().getContentAsString()))
+                .map(h -> h.get("hopStatus").asText())
+                .toList();
+    }
+
+    /** Message types of every stored message (any direction) sharing the UETR. */
+    private List<String> messageTypes(String uetr, String token) throws Exception {
+        MvcResult res = mvc.perform(get("/api/payments").header("Authorization", "Bearer " + token))
+                .andExpect(status().isOk())
+                .andReturn();
+        return stream(mapper.readTree(res.getResponse().getContentAsString()))
+                .filter(p -> uetr.equals(p.get("uetr").asText()))
+                .map(p -> p.get("messageType").asText())
+                .toList();
+    }
+
+    private JsonNode inbound(String uetr, String messageType, String token) throws Exception {
+        MvcResult res = mvc.perform(get("/api/inbox").header("Authorization", "Bearer " + token))
+                .andExpect(status().isOk())
+                .andReturn();
+        return stream(mapper.readTree(res.getResponse().getContentAsString()))
+                .filter(p -> uetr.equals(p.get("uetr").asText()) && messageType.equals(p.get("messageType").asText()))
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("No inbound " + messageType + " for " + uetr));
+    }
+
+    private static Stream<JsonNode> stream(JsonNode array) {
+        return StreamSupport.stream(array.spliterator(), false);
+    }
+
+    private String instructionJson(String debtor, String debtorTown) {
+        return """
+                {
+                  "debtorAgentBic":"ALPHGB2L",
+                  "creditorAgentBic":"CHASUS33",
+                  "amount":1500.00,
+                  "currency":"USD",
+                  "debtorName":"%s",
+                  "debtorStreet":"1 King",
+                  "debtorTown":"%s",
+                  "debtorCountry":"GB",
+                  "creditorName":"Widget LLC",
+                  "creditorStreet":"200 West",
+                  "creditorTown":"New York",
+                  "creditorCountry":"US",
+                  "chargeBearer":"SHAR"
+                }
+                """.formatted(debtor, debtorTown);
     }
 
     private String paymentJson(String debtor, String creditor) {

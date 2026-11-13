@@ -81,6 +81,110 @@ public class PaymentService {
         assertRole(actor, Role.PAYMENT_MAKER, Role.BANK_SECURITY_OFFICER);
         UUID tenantId = actor.requireTenantId();
         CreatePaymentRequest req = overlayTemplate(tenantId, incoming);
+        PaymentMessage msg = createDraft(actor, req, MxMessageFactory.newUetr(), "Created by maker");
+        UUID appliedTemplate = templateUuid(incoming.templateId());
+        if (appliedTemplate != null) {
+            auditService.record(actor, "TEMPLATE_APPLIED", "MessageTemplate", appliedTemplate.toString(), msg.getUetr());
+        }
+        return msg;
+    }
+
+    /**
+     * Stage 1 of the payment life cycle: a customer's pain.001 arrives at the tenant bank.
+     * The bank validates it, answers with exactly one pain.002 (ACCP or RJCT), and only an accepted
+     * instruction becomes a pacs.008 draft. The UETR is minted here and shared by every later message.
+     * A rejection is a normal business outcome, so both messages are persisted and no exception is raised.
+     */
+    @Transactional
+    public InitiationResult initiate(CurrentUser actor, CustomerInstructionRequest req) {
+        assertRole(actor, Role.PAYMENT_MAKER, Role.BANK_SECURITY_OFFICER);
+        UUID tenantId = actor.requireTenantId();
+        // Fields the message store cannot hold are a malformed file, not a business rejection.
+        MxMessageFactory.validateBic(req.debtorAgentBic());
+        MxMessageFactory.validateBic(req.creditorAgentBic());
+        if (req.amount() == null) {
+            throw new ApiException(400, "AMOUNT", "Instructed amount is mandatory on pain.001");
+        }
+        if (req.currency() == null || req.currency().length() != 3) {
+            throw new ApiException(400, "CURRENCY", "Currency must be an ISO 4217 code");
+        }
+        if (req.debtorName() == null || req.debtorName().isBlank()) {
+            throw new ApiException(400, "DEBTOR", "Debtor name is mandatory on pain.001");
+        }
+
+        String uetr = MxMessageFactory.newUetr();
+        PaymentMessage instruction = new PaymentMessage();
+        instruction.setId(UUID.randomUUID());
+        instruction.setTenantId(tenantId);
+        instruction.setMessageType("pain.001");
+        instruction.setUetr(uetr);
+        instruction.setDirection(MessageDirection.IN);
+        instruction.setStatus(MessageStatus.SCREENING);
+        copyParties(req, instruction);
+        instruction.setMakerId(actor.id());
+        instruction.setMxXml(MxMessageFactory.pain001(instruction));
+        instruction.setXmlFrozen(true);
+        payments.save(instruction);
+        gpiService.append(tenantId, uetr, "CUSTOMER_INSTRUCTED", instruction.getInstructingAgentBic(),
+                "pain.001 received from " + instruction.getDebtorName());
+
+        PaymentMessage draft = null;
+        String reasonCode = null;
+        String rejection = null;
+        try {
+            draft = buildDraft(actor, toCreateRequest(req), uetr);
+        } catch (ApiException ex) {
+            reasonCode = pain002Reason(ex.getCode());
+            rejection = ex.getMessage();
+        }
+
+        boolean accepted = draft != null;
+        instruction.setStatus(accepted ? MessageStatus.ACKED : MessageStatus.REJECTED);
+        instruction.setReasonCode(accepted ? "ACCP" : reasonCode);
+        instruction.setScreeningResult(rejection);
+
+        PaymentMessage statusReport = new PaymentMessage();
+        statusReport.setTenantId(tenantId);
+        statusReport.setMessageType("pain.002");
+        statusReport.setUetr(uetr);
+        statusReport.setDirection(MessageDirection.OUT);
+        statusReport.setStatus(accepted ? MessageStatus.ACKED : MessageStatus.REJECTED);
+        copyParties(req, statusReport);
+        statusReport.setReasonCode(accepted ? "ACCP" : reasonCode);
+        statusReport.setScreeningResult(rejection);
+        statusReport.setMxXml(MxMessageFactory.pain002(instruction, accepted ? "ACCP" : "RJCT", accepted ? null : reasonCode));
+        statusReport.setXmlFrozen(true);
+        payments.save(statusReport);
+
+        if (accepted) {
+            gpiService.append(tenantId, uetr, "CUSTOMER_ACCEPTED", instruction.getInstructingAgentBic(), "pain.002 ACCP");
+            auditService.record(actor, "INSTRUCTION_ACCEPTED", "PaymentMessage", instruction.getId().toString(), uetr);
+            // Only an accepted instruction becomes an interbank draft, so INITIATED follows the acceptance.
+            persistDraft(actor, draft, "pacs.008 drafted from accepted pain.001");
+        } else {
+            gpiService.append(tenantId, uetr, "CUSTOMER_REJECTED", instruction.getInstructingAgentBic(),
+                    "pain.002 RJCT " + reasonCode + ": " + rejection);
+            auditService.record(actor, "INSTRUCTION_REJECTED", "PaymentMessage", instruction.getId().toString(),
+                    reasonCode + " " + rejection);
+        }
+        return new InitiationResult(instruction, statusReport, draft, accepted, accepted ? "ACCP" : reasonCode, rejection);
+    }
+
+    /** Builds, validates and stores a pacs.008/pacs.009 draft carrying the given UETR. */
+    private PaymentMessage createDraft(CurrentUser actor, CreatePaymentRequest req, String uetr, String gpiDetail) {
+        return persistDraft(actor, buildDraft(actor, req, uetr), gpiDetail);
+    }
+
+    private PaymentMessage persistDraft(CurrentUser actor, PaymentMessage msg, String gpiDetail) {
+        payments.save(msg);
+        gpiService.append(msg.getTenantId(), msg.getUetr(), "INITIATED", msg.getInstructingAgentBic(), gpiDetail);
+        auditService.record(actor, "PAYMENT_CREATED", "PaymentMessage", msg.getId().toString(), msg.getUetr());
+        return msg;
+    }
+
+    /** Validates the request and builds an unsaved draft; throws ApiException on any business rule failure. */
+    private PaymentMessage buildDraft(CurrentUser actor, CreatePaymentRequest req, String uetr) {
+        UUID tenantId = actor.requireTenantId();
         if (!"pacs.008".equals(req.messageType()) && !"pacs.009".equals(req.messageType())) {
             throw new ApiException(400, "MSG_TYPE", "Use pacs.008 or pacs.009");
         }
@@ -96,7 +200,7 @@ public class PaymentService {
         msg.setId(UUID.randomUUID());
         msg.setTenantId(tenantId);
         msg.setMessageType(req.messageType());
-        msg.setUetr(MxMessageFactory.newUetr());
+        msg.setUetr(uetr);
         msg.setDirection(MessageDirection.OUT);
         msg.setStatus(MessageStatus.DRAFT);
         msg.setInstructingAgentBic(req.instructingAgentBic().toUpperCase());
@@ -115,14 +219,53 @@ public class PaymentService {
         msg.setMakerId(actor.id());
         MxMessageFactory.validateStructuredAddress(msg);
         msg.setMxXml("pacs.008".equals(msg.getMessageType()) ? MxMessageFactory.pacs008(msg) : MxMessageFactory.pacs009(msg));
-        payments.save(msg);
-        gpiService.append(tenantId, msg.getUetr(), "INITIATED", msg.getInstructingAgentBic(), "Created by maker");
-        auditService.record(actor, "PAYMENT_CREATED", "PaymentMessage", msg.getId().toString(), msg.getUetr());
-        UUID appliedTemplate = templateUuid(incoming.templateId());
-        if (appliedTemplate != null) {
-            auditService.record(actor, "TEMPLATE_APPLIED", "MessageTemplate", appliedTemplate.toString(), msg.getUetr());
-        }
         return msg;
+    }
+
+    private static void copyParties(CustomerInstructionRequest req, PaymentMessage msg) {
+        msg.setInstructingAgentBic(req.debtorAgentBic().toUpperCase());
+        msg.setInstructedAgentBic(req.creditorAgentBic().toUpperCase());
+        msg.setAmount(req.amount());
+        msg.setCurrency(req.currency().toUpperCase());
+        msg.setDebtorName(req.debtorName());
+        msg.setDebtorStreet(req.debtorStreet());
+        msg.setDebtorTown(req.debtorTown());
+        msg.setDebtorCountry(req.debtorCountry() == null ? null : req.debtorCountry().toUpperCase());
+        msg.setCreditorName(req.creditorName());
+        msg.setCreditorStreet(req.creditorStreet());
+        msg.setCreditorTown(req.creditorTown());
+        msg.setCreditorCountry(req.creditorCountry() == null ? null : req.creditorCountry().toUpperCase());
+        msg.setChargeBearer(req.chargeBearer() == null ? ChargeBearer.SHAR : req.chargeBearer());
+    }
+
+    private static CreatePaymentRequest toCreateRequest(CustomerInstructionRequest req) {
+        return new CreatePaymentRequest(
+                "pacs.008",
+                req.debtorAgentBic(),
+                req.creditorAgentBic(),
+                req.amount(),
+                req.currency(),
+                req.debtorName(),
+                req.debtorStreet(),
+                req.debtorTown(),
+                req.debtorCountry(),
+                req.creditorName(),
+                req.creditorStreet(),
+                req.creditorTown(),
+                req.creditorCountry(),
+                req.chargeBearer(),
+                null
+        );
+    }
+
+    /** Maps an internal validation code to the ISO 20022 external status reason reported on pain.002. */
+    static String pain002Reason(String apiCode) {
+        return switch (apiCode == null ? "" : apiCode) {
+            case "CBPR_ADDRESS" -> "BE04";   // missing/invalid postal address
+            case "AMOUNT" -> "AM02";         // amount not allowed
+            case "BIC_NOT_OWNED", "BIC" -> "RC01"; // bank identifier incorrect
+            default -> "NARR";               // narrative: see detail
+        };
     }
 
     private CreatePaymentRequest overlayTemplate(UUID tenantId, CreatePaymentRequest req) {
@@ -256,22 +399,51 @@ public class PaymentService {
                 gpiService.append(outbound.getTenantId(), outbound.getUetr(), "CREDITED",
                         outbound.getInstructedAgentBic(), "Stub tracker complete");
             } else if (inbound.messageType().startsWith("camt.")) {
-                CorrespondentAccount account = accounts.findFirstByTenantIdAndTypeAndCurrencyAndCorrespondentBic(
-                                outbound.getTenantId(), AccountType.NOSTRO, outbound.getCurrency(), outbound.getInstructedAgentBic())
-                        .or(() -> accounts.findByTenantId(outbound.getTenantId()).stream().findFirst())
-                        .orElse(null);
-                if (account != null) {
-                    CashStatement statement = new CashStatement();
-                    statement.setTenantId(outbound.getTenantId());
-                    statement.setMessageType(inbound.messageType());
-                    statement.setAccountId(account.getId());
-                    statement.setMxXml(inbound.xml());
-                    statement.setRelatedPaymentId(outbound.getId());
-                    statement.setUetr(outbound.getUetr());
-                    statements.save(statement);
-                }
+                storeStatement(outbound, inbound);
             }
         }
+    }
+
+    /** Stage 3 (Report): a camt.05x notification lands on the tenant's shadow nostro for that payment. */
+    private void storeStatement(PaymentMessage outbound, SwiftSendResult.InboundMx inbound) {
+        CorrespondentAccount account = accounts.findFirstByTenantIdAndTypeAndCurrencyAndCorrespondentBic(
+                        outbound.getTenantId(), AccountType.NOSTRO, outbound.getCurrency(), outbound.getInstructedAgentBic())
+                .or(() -> accounts.findByTenantId(outbound.getTenantId()).stream().findFirst())
+                .orElse(null);
+        if (account == null) {
+            return;
+        }
+        CashStatement statement = new CashStatement();
+        statement.setTenantId(outbound.getTenantId());
+        statement.setMessageType(inbound.messageType());
+        statement.setAccountId(account.getId());
+        statement.setMxXml(inbound.xml());
+        statement.setRelatedPaymentId(outbound.getId());
+        statement.setUetr(outbound.getUetr());
+        statements.save(statement);
+    }
+
+    /** Copies the parties of the original payment onto a related message, flipping agents for inbound ones. */
+    private static PaymentMessage relatedMessage(PaymentMessage original, String messageType, MessageDirection direction) {
+        PaymentMessage msg = new PaymentMessage();
+        msg.setTenantId(original.getTenantId());
+        msg.setMessageType(messageType);
+        msg.setUetr(original.getUetr());
+        msg.setDirection(direction);
+        boolean inbound = direction == MessageDirection.IN;
+        msg.setInstructingAgentBic(inbound ? original.getInstructedAgentBic() : original.getInstructingAgentBic());
+        msg.setInstructedAgentBic(inbound ? original.getInstructingAgentBic() : original.getInstructedAgentBic());
+        msg.setAmount(original.getAmount());
+        msg.setCurrency(original.getCurrency());
+        msg.setDebtorName(original.getDebtorName());
+        msg.setCreditorName(original.getCreditorName());
+        msg.setDebtorTown(original.getDebtorTown());
+        msg.setDebtorCountry(original.getDebtorCountry());
+        msg.setCreditorTown(original.getCreditorTown());
+        msg.setCreditorCountry(original.getCreditorCountry());
+        msg.setChargeBearer(original.getChargeBearer());
+        msg.setXmlFrozen(true);
+        return msg;
     }
 
     public List<PaymentMessage> list(CurrentUser actor, MessageDirection direction) {
@@ -286,53 +458,84 @@ public class PaymentService {
         return requireOwned(actor, id);
     }
 
+    /** Backwards-compatible recall with the default CUST reason. */
     @Transactional
     public PaymentMessage recall(CurrentUser actor, UUID id) {
+        return recall(actor, id, null);
+    }
+
+    /**
+     * Stage 4 of the payment life cycle: camt.056 asks the correspondent to recall a sent payment.
+     * The network answers with camt.029 (CNCL or RJCR). When the recall is accepted the correspondent
+     * returns the funds with pacs.004, the shadow ledger debit is reversed and a camt.054 credit lands.
+     * Every step is appended to the gpi tracker under the original UETR.
+     */
+    @Transactional
+    public PaymentMessage recall(CurrentUser actor, UUID id, String reasonCode) {
         assertRole(actor, Role.PAYMENT_MAKER, Role.PAYMENT_CHECKER, Role.BANK_SECURITY_OFFICER);
         PaymentMessage original = requireOwned(actor, id);
         if (original.getDirection() != MessageDirection.OUT) {
             throw new ApiException(400, "DIRECTION", "Recall applies to outbound payments");
         }
-        PaymentMessage recall = new PaymentMessage();
-        recall.setTenantId(original.getTenantId());
-        recall.setMessageType("camt.056");
-        recall.setUetr(original.getUetr());
-        recall.setDirection(MessageDirection.OUT);
+        if (!"pacs.008".equals(original.getMessageType()) && !"pacs.009".equals(original.getMessageType())) {
+            throw new ApiException(400, "MSG_TYPE", "Only a pacs.008 or pacs.009 can be recalled");
+        }
+        if (original.getStatus() == MessageStatus.RETURNED) {
+            throw new ApiException(409, "STATE", "Payment was already returned");
+        }
+        if (original.getStatus() != MessageStatus.SENT && original.getStatus() != MessageStatus.ACKED) {
+            throw new ApiException(409, "STATE", "Only a sent payment can be recalled");
+        }
+        String reason = reasonCode == null || reasonCode.isBlank() ? "CUST" : reasonCode.trim().toUpperCase();
+        if (reason.length() > 8 || !reason.chars().allMatch(Character::isLetterOrDigit)) {
+            throw new ApiException(400, "REASON", "Cancellation reason must be an ISO 20022 code such as CUST, DUPL or FRAD");
+        }
+
+        PaymentMessage recall = relatedMessage(original, "camt.056", MessageDirection.OUT);
         recall.setStatus(MessageStatus.SENT);
-        recall.setInstructingAgentBic(original.getInstructingAgentBic());
-        recall.setInstructedAgentBic(original.getInstructedAgentBic());
-        recall.setAmount(original.getAmount());
-        recall.setCurrency(original.getCurrency());
-        recall.setDebtorName(original.getDebtorName());
-        recall.setCreditorName(original.getCreditorName());
-        recall.setDebtorTown(original.getDebtorTown());
-        recall.setDebtorCountry(original.getDebtorCountry());
-        recall.setCreditorTown(original.getCreditorTown());
-        recall.setCreditorCountry(original.getCreditorCountry());
-        recall.setMxXml(MxMessageFactory.camt056(original));
-        recall.setXmlFrozen(true);
+        recall.setReasonCode(reason);
+        recall.setMxXml(MxMessageFactory.camt056(original, reason));
         recall.setMakerId(actor.id());
+        recall.setSentAt(java.time.Instant.now());
         payments.save(recall);
-        PaymentMessage resolution = new PaymentMessage();
-        resolution.setTenantId(original.getTenantId());
-        resolution.setMessageType("camt.029");
-        resolution.setUetr(original.getUetr());
-        resolution.setDirection(MessageDirection.IN);
-        resolution.setStatus(MessageStatus.ACKED);
-        resolution.setInstructingAgentBic(original.getInstructedAgentBic());
-        resolution.setInstructedAgentBic(original.getInstructingAgentBic());
-        resolution.setAmount(original.getAmount());
-        resolution.setCurrency(original.getCurrency());
-        resolution.setDebtorName(original.getDebtorName());
-        resolution.setCreditorName(original.getCreditorName());
-        resolution.setDebtorTown(original.getDebtorTown());
-        resolution.setDebtorCountry(original.getDebtorCountry());
-        resolution.setCreditorTown(original.getCreditorTown());
-        resolution.setCreditorCountry(original.getCreditorCountry());
-        resolution.setMxXml(MxMessageFactory.camt029(original, "RJCR"));
-        resolution.setXmlFrozen(true);
-        payments.save(resolution);
-        auditService.record(actor, "INVESTIGATION_RECALL", "PaymentMessage", original.getId().toString(), original.getUetr());
+        gpiService.append(original.getTenantId(), original.getUetr(), "RECALL_REQUESTED",
+                original.getInstructingAgentBic(), "camt.056 " + reason);
+
+        SwiftSendResult answer = swiftNetworkGateway.recall(original, recall);
+        for (SwiftSendResult.InboundMx inbound : answer.inbound()) {
+            switch (inbound.messageType()) {
+                case "camt.029" -> {
+                    PaymentMessage resolution = relatedMessage(original, "camt.029", MessageDirection.IN);
+                    resolution.setStatus(MessageStatus.ACKED);
+                    resolution.setReasonCode(inbound.statusCode());
+                    resolution.setMxXml(inbound.xml());
+                    payments.save(resolution);
+                    recall.setStatus(MessageStatus.ACKED);
+                    boolean cancelled = "CNCL".equals(inbound.statusCode());
+                    gpiService.append(original.getTenantId(), original.getUetr(),
+                            cancelled ? "RECALL_ACCEPTED" : "RECALL_REJECTED",
+                            original.getInstructedAgentBic(), "camt.029 " + inbound.statusCode());
+                }
+                case "pacs.004" -> {
+                    PaymentMessage paymentReturn = relatedMessage(original, "pacs.004", MessageDirection.IN);
+                    paymentReturn.setStatus(MessageStatus.ACKED);
+                    paymentReturn.setReasonCode(inbound.statusCode());
+                    paymentReturn.setMxXml(inbound.xml());
+                    payments.save(paymentReturn);
+                    original.setStatus(MessageStatus.RETURNED);
+                    ledgerService.postReturn(original, paymentReturn);
+                    gpiService.append(original.getTenantId(), original.getUetr(), "RETURNED",
+                            original.getInstructedAgentBic(), "pacs.004 " + inbound.statusCode() + " funds returned to nostro");
+                }
+                default -> {
+                    if (inbound.messageType().startsWith("camt.")) {
+                        storeStatement(original, inbound);
+                    }
+                }
+            }
+        }
+        auditService.record(actor, "INVESTIGATION_RECALL", "PaymentMessage", original.getId().toString(),
+                original.getUetr() + " " + reason + " -> " + original.getStatus());
         return recall;
     }
 
@@ -370,6 +573,38 @@ public class PaymentService {
             String creditorCountry,
             ChargeBearer chargeBearer,
             String templateId
+    ) {
+    }
+
+    /** A customer's pain.001 as the bank receives it: parties are named the ISO way (debtor/creditor agent). */
+    public record CustomerInstructionRequest(
+            String debtorAgentBic,
+            String creditorAgentBic,
+            BigDecimal amount,
+            String currency,
+            String debtorName,
+            String debtorStreet,
+            String debtorTown,
+            String debtorCountry,
+            String creditorName,
+            String creditorStreet,
+            String creditorTown,
+            String creditorCountry,
+            ChargeBearer chargeBearer
+    ) {
+    }
+
+    /**
+     * Outcome of stage 1: the stored pain.001, the pain.002 sent back, and the pacs.008 draft
+     * (null when rejected). {@code reasonCode} is ACCP or the ISO rejection reason on the pain.002.
+     */
+    public record InitiationResult(
+            PaymentMessage instruction,
+            PaymentMessage statusReport,
+            PaymentMessage payment,
+            boolean accepted,
+            String reasonCode,
+            String rejectionDetail
     ) {
     }
 }

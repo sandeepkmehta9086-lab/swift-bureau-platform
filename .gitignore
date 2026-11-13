@@ -13,3 +13,4 @@ backend/data/
 .DS_Store
 Thumbs.db
 seed-credentials.txt
+frontend/coverage/
