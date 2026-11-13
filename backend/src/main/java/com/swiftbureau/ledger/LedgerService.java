@@ -25,12 +25,7 @@ public class LedgerService {
 
     @Transactional
     public void postOutbound(PaymentMessage msg) {
-        CorrespondentAccount nostro = accounts.findFirstByTenantIdAndTypeAndCurrencyAndCorrespondentBic(
-                        msg.getTenantId(), AccountType.NOSTRO, msg.getCurrency(), msg.getInstructedAgentBic())
-                .or(() -> accounts.findByTenantId(msg.getTenantId()).stream()
-                        .filter(a -> a.getType() == AccountType.NOSTRO && a.getCurrency().equals(msg.getCurrency()))
-                        .findFirst())
-                .orElse(null);
+        CorrespondentAccount nostro = nostroFor(msg);
         if (nostro == null) {
             return;
         }
@@ -45,6 +40,35 @@ public class LedgerService {
         debit.setUetr(msg.getUetr());
         debit.setNarrative("Outbound " + msg.getMessageType());
         entries.save(debit);
+    }
+
+    /** Reverses the outbound debit when the correspondent returns the funds with a pacs.004. */
+    @Transactional
+    public void postReturn(PaymentMessage original, PaymentMessage paymentReturn) {
+        CorrespondentAccount nostro = nostroFor(original);
+        if (nostro == null) {
+            return;
+        }
+        LedgerEntry credit = new LedgerEntry();
+        credit.setTenantId(original.getTenantId());
+        credit.setAccountId(nostro.getId());
+        credit.setDebit(BigDecimal.ZERO);
+        credit.setCredit(original.getAmount());
+        credit.setCurrency(original.getCurrency());
+        credit.setValueDate(LocalDate.now());
+        credit.setPaymentMessageId(paymentReturn.getId());
+        credit.setUetr(original.getUetr());
+        credit.setNarrative("Return " + paymentReturn.getMessageType() + " of " + original.getMessageType());
+        entries.save(credit);
+    }
+
+    private CorrespondentAccount nostroFor(PaymentMessage msg) {
+        return accounts.findFirstByTenantIdAndTypeAndCurrencyAndCorrespondentBic(
+                        msg.getTenantId(), AccountType.NOSTRO, msg.getCurrency(), msg.getInstructedAgentBic())
+                .or(() -> accounts.findByTenantId(msg.getTenantId()).stream()
+                        .filter(a -> a.getType() == AccountType.NOSTRO && a.getCurrency().equals(msg.getCurrency()))
+                        .findFirst())
+                .orElse(null);
     }
 
     public BigDecimal bookedBalance(UUID tenantId, UUID accountId) {

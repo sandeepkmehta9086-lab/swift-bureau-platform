@@ -83,6 +83,157 @@ public final class MxMessageFactory {
         );
     }
 
+    /** Stage 1 (Initiate): the customer's instruction to its bank. Stored with the UETR the pacs.008 will carry. */
+    public static String pain001(PaymentMessage p) {
+        UUID id = p.getId() != null ? p.getId() : UUID.randomUUID();
+        String msgId = "C" + id.toString().replace("-", "").substring(0, 16);
+        return """
+                <?xml version="1.0" encoding="UTF-8"?>
+                <Document xmlns="urn:iso:std:iso:20022:tech:xsd:pain.001.001.09">
+                  <CstmrCdtTrfInitn>
+                    <GrpHdr>
+                      <MsgId>%s</MsgId>
+                      <CreDtTm>%s</CreDtTm>
+                      <NbOfTxs>1</NbOfTxs>
+                      <InitgPty><Nm>%s</Nm></InitgPty>
+                    </GrpHdr>
+                    <PmtInf>
+                      <PmtInfId>%s</PmtInfId>
+                      <PmtMtd>TRF</PmtMtd>
+                      <Dbtr>
+                        <Nm>%s</Nm>
+                        <PstlAdr>
+                          <StrtNm>%s</StrtNm>
+                          <TwnNm>%s</TwnNm>
+                          <Ctry>%s</Ctry>
+                        </PstlAdr>
+                      </Dbtr>
+                      <DbtrAgt><FinInstnId><BICFI>%s</BICFI></FinInstnId></DbtrAgt>
+                      <CdtTrfTxInf>
+                        <PmtId>
+                          <EndToEndId>%s</EndToEndId>
+                          <UETR>%s</UETR>
+                        </PmtId>
+                        <Amt><InstdAmt Ccy="%s">%s</InstdAmt></Amt>
+                        <ChrgBr>%s</ChrgBr>
+                        <CdtrAgt><FinInstnId><BICFI>%s</BICFI></FinInstnId></CdtrAgt>
+                        <Cdtr>
+                          <Nm>%s</Nm>
+                          <PstlAdr>
+                            <StrtNm>%s</StrtNm>
+                            <TwnNm>%s</TwnNm>
+                            <Ctry>%s</Ctry>
+                          </PstlAdr>
+                        </Cdtr>
+                      </CdtTrfTxInf>
+                    </PmtInf>
+                  </CstmrCdtTrfInitn>
+                </Document>
+                """.formatted(
+                esc(msgId),
+                ISO.format(Instant.now()),
+                esc(p.getDebtorName()),
+                esc(msgId),
+                esc(p.getDebtorName()),
+                esc(nz(p.getDebtorStreet())),
+                esc(nz(p.getDebtorTown())),
+                esc(nz(p.getDebtorCountry())),
+                esc(p.getInstructingAgentBic()),
+                esc(id.toString()),
+                esc(p.getUetr()),
+                esc(p.getCurrency()),
+                p.getAmount().toPlainString(),
+                charge(p.getChargeBearer()),
+                esc(p.getInstructedAgentBic()),
+                esc(nz(p.getCreditorName())),
+                esc(nz(p.getCreditorStreet())),
+                esc(nz(p.getCreditorTown())),
+                esc(nz(p.getCreditorCountry()))
+        );
+    }
+
+    /** Stage 1 (Initiate): the bank's answer to a pain.001. Status ACCP or RJCT; reason code only when rejected. */
+    public static String pain002(PaymentMessage instruction, String status, String reasonCode) {
+        String msgId = "P" + UUID.randomUUID().toString().replace("-", "").substring(0, 16);
+        String reason = reasonCode == null || reasonCode.isBlank()
+                ? ""
+                : "<StsRsnInf><Rsn><Cd>" + esc(reasonCode) + "</Cd></Rsn></StsRsnInf>";
+        return """
+                <?xml version="1.0" encoding="UTF-8"?>
+                <Document xmlns="urn:iso:std:iso:20022:tech:xsd:pain.002.001.10">
+                  <CstmrPmtStsRpt>
+                    <GrpHdr>
+                      <MsgId>%s</MsgId>
+                      <CreDtTm>%s</CreDtTm>
+                    </GrpHdr>
+                    <OrgnlGrpInfAndSts>
+                      <OrgnlMsgId>%s</OrgnlMsgId>
+                      <OrgnlMsgNmId>pain.001.001.09</OrgnlMsgNmId>
+                      <GrpSts>%s</GrpSts>
+                      %s
+                    </OrgnlGrpInfAndSts>
+                    <OrgnlPmtInfAndSts>
+                      <TxInfAndSts>
+                        <OrgnlUETR>%s</OrgnlUETR>
+                        <TxSts>%s</TxSts>
+                      </TxInfAndSts>
+                    </OrgnlPmtInfAndSts>
+                  </CstmrPmtStsRpt>
+                </Document>
+                """.formatted(
+                esc(msgId),
+                ISO.format(Instant.now()),
+                esc(instruction.getId().toString()),
+                esc(status),
+                reason,
+                esc(instruction.getUetr()),
+                esc(status)
+        );
+    }
+
+    /** Stage 4 (Recall): the creditor bank returns the funds after accepting a camt.056. */
+    public static String pacs004(PaymentMessage original, String reasonCode) {
+        String msgId = "R" + UUID.randomUUID().toString().replace("-", "").substring(0, 16);
+        return """
+                <?xml version="1.0" encoding="UTF-8"?>
+                <Document xmlns="urn:iso:std:iso:20022:tech:xsd:pacs.004.001.09">
+                  <PmtRtr>
+                    <GrpHdr>
+                      <MsgId>%s</MsgId>
+                      <CreDtTm>%s</CreDtTm>
+                      <NbOfTxs>1</NbOfTxs>
+                      <SttlmInf><SttlmMtd>INDA</SttlmMtd></SttlmInf>
+                    </GrpHdr>
+                    <TxInf>
+                      <OrgnlGrpInf>
+                        <OrgnlMsgId>%s</OrgnlMsgId>
+                        <OrgnlMsgNmId>%s</OrgnlMsgNmId>
+                      </OrgnlGrpInf>
+                      <OrgnlUETR>%s</OrgnlUETR>
+                      <OrgnlIntrBkSttlmAmt Ccy="%s">%s</OrgnlIntrBkSttlmAmt>
+                      <RtrdIntrBkSttlmAmt Ccy="%s">%s</RtrdIntrBkSttlmAmt>
+                      <InstgAgt><FinInstnId><BICFI>%s</BICFI></FinInstnId></InstgAgt>
+                      <InstdAgt><FinInstnId><BICFI>%s</BICFI></FinInstnId></InstdAgt>
+                      <RtrRsnInf><Rsn><Cd>%s</Cd></Rsn></RtrRsnInf>
+                    </TxInf>
+                  </PmtRtr>
+                </Document>
+                """.formatted(
+                esc(msgId),
+                ISO.format(Instant.now()),
+                esc(original.getId().toString()),
+                esc(original.getMessageType()),
+                esc(original.getUetr()),
+                esc(original.getCurrency()),
+                original.getAmount().toPlainString(),
+                esc(original.getCurrency()),
+                original.getAmount().toPlainString(),
+                esc(original.getInstructedAgentBic()),
+                esc(original.getInstructingAgentBic()),
+                esc(reasonCode)
+        );
+    }
+
     public static String pacs009(PaymentMessage p) {
         return pacs008(p)
                 .replace("urn:iso:std:iso:20022:tech:xsd:pacs.008.001.08", "urn:iso:std:iso:20022:tech:xsd:pacs.009.001.08")
@@ -173,20 +324,39 @@ public final class MxMessageFactory {
     }
 
     public static String camt056(PaymentMessage original) {
+        return camt056(original, "CUST");
+    }
+
+    /** Stage 4 (Recall): references the original pacs.008 by message id, UETR and amount, with an ISO cancellation reason. */
+    public static String camt056(PaymentMessage original, String reasonCode) {
         return """
                 <?xml version="1.0" encoding="UTF-8"?>
                 <Document xmlns="urn:iso:std:iso:20022:tech:xsd:camt.056.001.08">
                   <FIToFIPmtCxlReq>
-                    <Assgnmt><Id>R%s</Id></Assgnmt>
+                    <Assgnmt><Id>R%s</Id><CreDtTm>%s</CreDtTm></Assgnmt>
                     <Undrlyg>
                       <TxInf>
+                        <OrgnlGrpInf>
+                          <OrgnlMsgId>%s</OrgnlMsgId>
+                          <OrgnlMsgNmId>%s</OrgnlMsgNmId>
+                        </OrgnlGrpInf>
                         <OrgnlUETR>%s</OrgnlUETR>
-                        <CxlRsnInf><Rsn><Prtry>CUST</Prtry></Rsn></CxlRsnInf>
+                        <OrgnlIntrBkSttlmAmt Ccy="%s">%s</OrgnlIntrBkSttlmAmt>
+                        <CxlRsnInf><Rsn><Cd>%s</Cd></Rsn></CxlRsnInf>
                       </TxInf>
                     </Undrlyg>
                   </FIToFIPmtCxlReq>
                 </Document>
-                """.formatted(original.getId().toString().substring(0, 8), original.getUetr());
+                """.formatted(
+                original.getId().toString().substring(0, 8),
+                ISO.format(Instant.now()),
+                esc(original.getId().toString()),
+                esc(original.getMessageType()),
+                esc(original.getUetr()),
+                esc(original.getCurrency()),
+                original.getAmount().toPlainString(),
+                esc(reasonCode == null || reasonCode.isBlank() ? "CUST" : reasonCode)
+        );
     }
 
     public static String camt029(PaymentMessage original, String status) {

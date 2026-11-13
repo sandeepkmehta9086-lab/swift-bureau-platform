@@ -89,4 +89,8 @@ public class GpiEvent {
     public Instant getOccurredAt() {
         return occurredAt;
     }
+
+    public void setOccurredAt(Instant occurredAt) {
+        this.occurredAt = occurredAt;
+    }
 }

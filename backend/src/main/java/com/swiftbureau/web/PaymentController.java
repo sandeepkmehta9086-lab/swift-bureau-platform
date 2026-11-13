@@ -65,8 +65,18 @@ public class PaymentController {
         return paymentService.list(SecurityUtil.current(), MessageDirection.IN);
     }
 
+    /** Stage 1: a customer pain.001 arrives; the bank answers with pain.002 and drafts the pacs.008 if accepted. */
+    @PostMapping("/payments/initiate")
+    public PaymentService.InitiationResult initiate(@RequestBody PaymentService.CustomerInstructionRequest request) {
+        return paymentService.initiate(SecurityUtil.current(), request);
+    }
+
+    /** Stage 4: camt.056 recall. Body is optional; {@code reasonCode} defaults to CUST. */
     @PostMapping("/payments/{id}/recall")
-    public PaymentMessage recall(@PathVariable java.util.UUID id) {
-        return paymentService.recall(SecurityUtil.current(), id);
+    public PaymentMessage recall(@PathVariable java.util.UUID id, @RequestBody(required = false) RecallRequest request) {
+        return paymentService.recall(SecurityUtil.current(), id, request == null ? null : request.reasonCode());
+    }
+
+    public record RecallRequest(String reasonCode) {
     }
 }
