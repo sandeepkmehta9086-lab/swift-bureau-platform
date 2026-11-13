@@ -1,5 +1,5 @@
 # Demo of the SWIFT payment flow one of the flow
-[![Watch the video]([https://img.youtube.com/vi/T-D1KVIuvjA/maxresdefault.jpg)](https://youtu.be/T-D1KVIuvjA](https://www.youtube.com/embed/kX6AA-Hortk?si=J8NmJBHVnFpsjqHY))
+[![Watch the video](http://img.youtube.com/vi/kX6AA-Hortk/0.jpg)](https://www.youtube.com/watch?v=kX6AA-Hortk "Video Title")
 
 # SWIFT Service Bureau and Correspondent Operations Platform
 
