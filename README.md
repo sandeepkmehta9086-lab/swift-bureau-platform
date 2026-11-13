@@ -1,3 +1,6 @@
+# Demo of the SWIFT payment flow one of the flow
+[![Watch the video]([https://img.youtube.com/vi/T-D1KVIuvjA/maxresdefault.jpg)](https://youtu.be/T-D1KVIuvjA](https://www.youtube.com/embed/kX6AA-Hortk?si=J8NmJBHVnFpsjqHY))
+
 # SWIFT Service Bureau and Correspondent Operations Platform
 
 Multi-tenant portal for banks that are onboarded (not self-registered) to send ISO 20022 CBPR+ payments through a **Service Bureau**. Default runtime uses a **stub SWIFT adapter**. It is a simulator until SIP, Alliance Cloud, and vendor screening are complete.
